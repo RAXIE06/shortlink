@@ -14,18 +14,10 @@ route.use("*", requireAuth);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** A project logo is small and there are only a few per account, so it's kept
- *  inline (a data URL or http URL) — no R2 round-trip, and it renders without an
- *  authenticated image request. */
+/** Project logos are kept inline as data URLs or external HTTP(S) URLs. */
 function cleanLogo(value: string | null | undefined): string {
   if (!value) return "";
   return value.startsWith("data:image/") || value.startsWith("http") ? value : "";
-}
-
-function bytesToDataUrl(bytes: Uint8Array, type: string): string {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return `data:${type};base64,${btoa(bin)}`;
 }
 
 function toDTO(row: ProjectRow, linkCount: number, isDefault: boolean): ProjectDTO {
@@ -86,22 +78,6 @@ route.get("/", async (c) => {
       .where(eq(links.userId, user.id))
       .groupBy(links.projectId),
   ]);
-
-  // Migrate any legacy R2-stored logos to inline data URLs (one-time), freeing R2.
-  for (const r of rows) {
-    if (r.logo === "r2") {
-      const key = `projlogo/${r.id}`;
-      const obj = await c.env.LOGO_BUCKET.get(key);
-      r.logo = obj
-        ? bytesToDataUrl(
-            new Uint8Array(await obj.arrayBuffer()),
-            obj.httpMetadata?.contentType ?? "image/png",
-          )
-        : "";
-      await c.var.db.update(projects).set({ logo: r.logo }).where(eq(projects.id, r.id));
-      c.executionCtx.waitUntil(c.env.LOGO_BUCKET.delete(key).catch(() => {}));
-    }
-  }
 
   const countMap = new Map(counts.map((r) => [r.pid, Number(r.n)]));
   const body: ProjectListDTO = {
@@ -190,20 +166,12 @@ route.delete("/:id", async (c) => {
         id: links.id,
         slug: links.slug,
         domainId: links.domainId,
-        ogImage: links.ogImage,
       })
       .from(links)
       .where(and(eq(links.userId, user.id), eq(links.projectId, proj.id)));
     // Purge every entry point's cache before the delete cascades the aliases.
     await Promise.all(doomed.map((l) => purgeLinkCache(c.env, db, c.var.schema, l)));
     await db.delete(links).where(and(eq(links.userId, user.id), eq(links.projectId, proj.id)));
-    c.executionCtx.waitUntil(
-      Promise.all(
-        doomed
-          .filter((l) => l.ogImage === "r2")
-          .map((l) => c.env.LOGO_BUCKET.delete(`og/${l.id}`).catch(() => {})),
-      ).then(() => {}),
-    );
   } else {
     const target = (to && others.find((o) => o.id === to)?.id) || others[0].id;
     await db
@@ -213,9 +181,6 @@ route.delete("/:id", async (c) => {
   }
 
   await db.delete(projects).where(eq(projects.id, proj.id));
-  // Legacy project logos lived in R2 (projlogo/<id>); new ones are inline data
-  // URLs. Drop any R2 object on delete so nothing lingers (no-op if absent).
-  c.executionCtx.waitUntil(c.env.LOGO_BUCKET.delete(`projlogo/${proj.id}`).catch(() => {}));
   return c.json({ ok: true });
 });
 
