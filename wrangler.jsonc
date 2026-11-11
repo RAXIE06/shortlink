@@ -1,3 +1,4 @@
+
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "shortlink",
@@ -13,8 +14,6 @@
   "observability": {
     "enabled": true
   },
-  // Daily cleanup of custom domains left unverified past the admin-configured
-  // window (worker/index.ts `scheduled`).
   "triggers": {
     "crons": ["0 3 * * *"]
   },
@@ -22,28 +21,10 @@
     "mode": "smart"
   },
   "vars": {
-    // The canonical public origin used for every displayed short URL, QR target
-    // and API doc — AND the single knob for your domain (the deploy derives the
-    // Worker's route from its host; see the routes note at the bottom).
-    // This is just the DEFAULT. To use your own domain you don't edit this file:
-    // set an APP_URL env var instead — in Workers Builds → Settings → Variables,
-    // or local `.dev.vars` / `export APP_URL=…` — and `scripts/apply-domain.mjs`
-    // applies it on deploy.
     "APP_URL": "https://shortlink.botnick.workers.dev",
-    // Database driver: "d1" (default — fully on Cloudflare, $0, nothing to set
-    // up) or "postgres" (uncomment the `hyperdrive` block at the bottom and set
-    // its id). With D1 the database is auto-created on the first deploy and the
-    // migrations are applied automatically — see `d1_databases` below.
     "DB_DRIVER": "d1",
-    // Password PBKDF2 cost. Default 20000 fits the Workers FREE 10ms CPU budget
-    // (paired with a server-side pepper — see worker/lib/password.ts). Keep it
-    // <= ~45000 on the free plan; raise toward OWASP's 600000 only on Workers
-    // Paid (30s CPU). Old hashes upgrade automatically on the next login.
     "PBKDF2_ITERATIONS": "20000"
   },
-  // D1 — Cloudflare's serverless SQL database (the default driver). On the first
-  // deploy Cloudflare AUTO-CREATES this database (no id needed); `npm run deploy`
-  // then applies the migrations in `drizzle/sqlite` for you (scripts/postdeploy.mjs).
   "d1_databases": [
     {
       "binding": "DB",
@@ -51,55 +32,34 @@
       "migrations_dir": "drizzle/sqlite"
     }
   ],
-  // KV — the redirect edge cache. Auto-created on the first deploy (no id needed).
   "kv_namespaces": [
     {
       "binding": "LINKS_KV"
     }
   ],
-  // R2 — QR logo library / uploaded OG images. Auto-created on the first deploy.
-  "r2_buckets": [
-    {
-      "binding": "LOGO_BUCKET",
-      "bucket_name": "shortlink-logos"
-    }
-  ],
-  // Workers AI — powers the optional AI link assistant (slug + social-card text
-  // suggestions). Free-tier friendly (a daily Neuron allowance); the feature is
-  // opt-in, admin-capped, and degrades to the offline "Optimize" if absent.
-  "ai": { "binding": "AI" },
-  // Exact rate-limit counter for the human check (SQLite-backed Durable Object,
-  // so it runs on the Workers FREE plan). The worker falls back to the KV limiter
-  // if this binding is ever absent. Local dev simulates it automatically.
+  "ai": {
+    "binding": "AI"
+  },
   "durable_objects": {
     "bindings": [
-      { "name": "RATE_LIMITER", "class_name": "RateLimiter" },
-      // Aggregates clicks for the optional "rollup" logging mode (sharded per
-      // link) and flushes hourly counts to D1 — keeps high-traffic installs
-      // under D1's write cap. SQLite-backed, so it's on the Free plan.
-      { "name": "CLICK_AGG", "class_name": "ClickAggregator" }
+      {
+        "name": "RATE_LIMITER",
+        "class_name": "RateLimiter"
+      },
+      {
+        "name": "CLICK_AGG",
+        "class_name": "ClickAggregator"
+      }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["RateLimiter"] },
-    { "tag": "v2", "new_sqlite_classes": ["ClickAggregator"] }
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RateLimiter"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["ClickAggregator"]
+    }
   ]
-
-  // --- Use Postgres instead of D1 (optional) -----------------------------------
-  // Set "DB_DRIVER": "postgres" above, provision Hyperdrive and paste its id, then
-  // uncomment the block below. Also flip the `DB` / `HYPERDRIVE` optionality in
-  // worker/env.ts (see the notes there). Local dev reads the connection string
-  // from .dev.vars (see .dev.vars.example).
-  //   npx wrangler hyperdrive create shortlink-db --connection-string="postgres://USER:PASS@HOST:5432/DB?sslmode=require"
-  // "hyperdrive": [
-  //   { "binding": "HYPERDRIVE", "id": "REPLACE_WITH_HYPERDRIVE_ID" }
-  // ],
-
-  // --- Serve on your own domain --------------------------------------------------
-  // You DON'T edit routes here, and you don't even have to edit APP_URL above: set
-  // an APP_URL env var (Workers Builds → Variables, or local .dev.vars / export) and
-  // `scripts/apply-domain.mjs` derives the Workers Custom Domain route from its host
-  // at deploy time (a *.workers.dev host gets no route; your own domain gets a
-  // `custom_domain` route, with Cloudflare managing DNS + TLS). The domain's zone must
-  // be on this Cloudflare account. See docs/CUSTOM-DOMAINS.md.
 }
