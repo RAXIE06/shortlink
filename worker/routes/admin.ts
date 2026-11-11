@@ -258,8 +258,7 @@ admin.patch("/settings", zValidator("json", settingsSchema), async (c) => {
     await setSetting(db, schema, SETTING_KEYS.brandColor, input.brandColor);
   }
   if (input.logoUrl !== undefined) {
-    // Raster data: URIs go to R2; only a short served URL is stored (keeps
-    // /api/config tiny). URLs/SVG/"" pass through unchanged.
+    // R2 storage is disabled. Keep external URLs, SVG, and data URIs as provided.
     await setSetting(
       db,
       schema,
@@ -711,9 +710,6 @@ admin.delete("/links/:id", async (c) => {
   // Purge every entry point's cache before the cascade removes the alias rows.
   await purgeLinkCache(c.env, c.var.db, c.var.schema, existing);
   await c.var.db.delete(links).where(eq(links.id, id));
-  if (existing.ogImage === "r2") {
-    await c.env.LOGO_BUCKET.delete(`og/${existing.id}`).catch(() => {});
-  }
   return c.json({ ok: true });
 });
 
@@ -795,13 +791,6 @@ admin.post("/links/bulk", zValidator("json", bulkLinksSchema), async (c) => {
     // mirrors the single-link DELETE and the documented invariant.
     await Promise.all(targets.map((r) => purgeLinkCache(c.env, db, c.var.schema, r)));
     await db.delete(links).where(inArray(links.id, ids));
-    c.executionCtx.waitUntil(
-      Promise.all(
-        targets
-          .filter((r) => r.ogImage === "r2")
-          .map((r) => c.env.LOGO_BUCKET.delete(`og/${r.id}`).catch(() => {})),
-      ).then(() => {}),
-    );
     return c.json({ ok: true, count: targets.length });
   }
 
