@@ -241,26 +241,8 @@ app.get("/sitemap.xml", async (c) =>
 );
 app.get("/icon", (c) => serveBrandImage(c.env, "icon"));
 app.get("/og", (c) => serveBrandImage(c.env, "og"));
-// Public, content-addressed brand images (logo / OG) stored in R2. The sha in the
-// path makes the bytes immutable, so they cache forever — this is what /api/config
-// and the SPA point at instead of shipping a ~100KB base64 data: URI.
-app.get("/brand/:kind/:sha", async (c) => {
-  const kind = c.req.param("kind");
-  const sha = c.req.param("sha");
-  if ((kind !== "logo" && kind !== "og") || !/^[a-f0-9]{64}$/.test(sha)) {
-    return c.notFound();
-  }
-  const obj = await c.env.LOGO_BUCKET.get(`brand/${kind}/${sha}`);
-  if (!obj) return c.notFound();
-  return new Response(obj.body, {
-    headers: {
-      "content-type": obj.httpMetadata?.contentType ?? "application/octet-stream",
-      "cache-control": "public, max-age=31536000, immutable",
-      etag: `"${sha}"`,
-      "x-content-type-options": "nosniff",
-    },
-  });
-});
+// R2 is disabled in this deployment. Old R2-hosted brand image URLs are unavailable.
+app.get("/brand/:kind/:sha", (c) => c.notFound());
 // Public per-link OG image (so social crawlers can fetch a real URL).
 app.get("/ogimg/:id", (c) => serveLinkOgImage(c, c.req.param("id")));
 
@@ -476,29 +458,19 @@ async function serveSocialPreview(
     const expired = l.expiresAt ? l.expiresAt.getTime() <= Date.now() : false;
     if (!l.isActive || expired || l.previewMode === "off") return null;
 
-    // Crawlers need an ABSOLUTE og:image on the real short domain — never the
-    // APP_URL placeholder. /ogimg/:id is served on the canonical short origin.
-    const ogOrigin = await shortOrigin(c.env);
-
     let preview;
     if (l.previewMode === "destination") {
       preview = await destinationPreview(c.env, l.id, l.destination);
       // If the destination exposes no image, fall back to the branded card we
       // baked at create time (stored like a custom image, served from R2) so the
       // shared card still looks designed instead of bare.
-      if (!preview.image && l.ogImage) {
-        preview.image = l.ogImage.startsWith("http")
-          ? l.ogImage
-          : `${ogOrigin}/ogimg/${l.id}`;
+      if (!preview.image && l.ogImage?.startsWith("http")) {
+        preview.image = l.ogImage;
       }
     } else {
-      // og:image must be a public URL (social ignores data: URLs). A custom
-      // image lives in R2 ("r2") and is served via the public /ogimg/:id endpoint.
-      const image = l.ogImage
-        ? l.ogImage.startsWith("http")
-          ? l.ogImage
-          : `${ogOrigin}/ogimg/${l.id}`
-        : "";
+      // Social crawlers require a public URL; external image URLs remain supported.
+      // R2-hosted custom images are disabled in this deployment.
+      const image = l.ogImage?.startsWith("http") ? l.ogImage : "";
       preview = {
         title: l.ogTitle ?? "",
         description: l.ogDescription ?? "",
@@ -521,32 +493,26 @@ async function serveSocialPreview(
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Serve a link's custom OG image bytes publicly from R2 (keyed by link id). */
+/** Custom R2 OG image serving is disabled in this deployment. */
 async function serveLinkOgImage(c: AppContext, id: string): Promise<Response> {
-  if (!UUID_RE.test(id)) return new Response("Not found", { status: 404 });
+  if (!UUID_RE.test(id)) {
+    return new Response("Not found", { status: 404 });
+  }
+
   const { db, schema, close } = getDbHandle(c.env);
-  const { links } = schema;
   try {
     const rows = await db
-      .select({ ogImage: links.ogImage })
-      .from(links)
-      .where(eq(links.id, id))
+      .select({ ogImage: schema.links.ogImage })
+      .from(schema.links)
+      .where(eq(schema.links.id, id))
       .limit(1);
+
     const src = rows[0]?.ogImage ?? "";
-    if (src.startsWith("http")) return Response.redirect(src, 302);
-    // Custom OG images are stored as a blob in R2 (keyed by link id), not in the DB.
-    if (src !== "r2") return new Response("Not found", { status: 404 });
-    const obj = await c.env.LOGO_BUCKET.get(`og/${id}`);
-    if (!obj) return new Response("Not found", { status: 404 });
-    return new Response(obj.body, {
-      headers: {
-        "content-type": obj.httpMetadata?.contentType ?? "image/jpeg",
-        "cache-control": "public, max-age=86400",
-        // Don't let a stored blob be sniffed into an executable type (only raster
-        // MIMEs are accepted on write — this is the second layer).
-        "x-content-type-options": "nosniff",
-      },
-    });
+    if (src.startsWith("http")) {
+      return Response.redirect(src, 302);
+    }
+
+    return new Response("Not found", { status: 404 });
   } finally {
     c.executionCtx.waitUntil(close());
   }
