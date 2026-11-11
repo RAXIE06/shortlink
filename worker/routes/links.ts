@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { type SQL, and, count, desc, eq, gte, lt, ne, sql } from "drizzle-orm";
-import type { AppContext, AppEnv, AppBindings } from "../env";
+import type { AppContext, AppEnv } from "../env";
 import type { DB, DbSchema } from "../db";
 import type { LinkRow } from "../db/schema";
 import {
@@ -22,51 +22,33 @@ import { fetchMeta, invalidateLinkPreview } from "../lib/social";
 import { resolveProjectId } from "../lib/projects";
 
 /**
- * Store a link's OG image in R2 (cheap blob storage) instead of bloating the DB
- * row with a base64 data URL. Returns the value to persist in `links.ogImage`:
- * "r2" (stored at og/<id>), the http URL as-is, or "" (none / removed).
+ * R2 storage is disabled. Keep external image URLs and validated raster data
+ * URLs directly in the database. Old R2 pointer URLs are discarded because
+ * their stored objects are no longer available.
  */
-async function resolveOgImage(
-  env: AppBindings,
-  linkId: string,
-  value: string | null | undefined,
-): Promise<string> {
-  const key = `og/${linkId}`;
-  if (!value) {
-    await env.LOGO_BUCKET.delete(key).catch(() => {});
-    return "";
-  }
-  // Our own pointer URL (edit without changing the image) → keep the R2 object.
-  // Origin-agnostic: the DTO ships a relative `/ogimg/<id>`, but older rows may
-  // hold an absolute pointer — match either so an unchanged edit never drops it.
-  if (value.endsWith(`/ogimg/${linkId}`)) return "r2";
-  // Switched to an external image URL → drop any R2 blob we were holding so it
-  // doesn't linger orphaned (delete on a missing key is a harmless no-op).
-  if (value.startsWith("http")) {
-    await env.LOGO_BUCKET.delete(key).catch(() => {});
-    return value;
-  }
-  const m = /^data:([^;]+);base64,(.+)$/.exec(value);
-  if (!m) return "";
-  // Only store raster image types. SVG (image/svg+xml) is rejected on purpose:
-  // /ogimg/:id serves these bytes same-origin with their stored content-type, so
-  // an SVG would render inline and could carry script — restrict the MIME here
-  // (and the endpoint sends X-Content-Type-Options: nosniff as a second layer).
-  const mime = m[1].toLowerCase();
+function resolveOgImage(value: string | null | undefined): string {
+  if (!value) return "";
+  if (value.startsWith("http://") || value.startsWith("https://")) return value;
+
+  // An old R2-backed image cannot be recovered without the R2 bucket.
+  if (value.includes("/ogimg/") || value === "r2") return "";
+
+  const match = /^data:([^;]+);base64,(.+)$/.exec(value);
+  if (!match) return "";
+
+  const mime = match[1].toLowerCase();
   if (!["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"].includes(mime)) {
-    await env.LOGO_BUCKET.delete(key).catch(() => {});
     return "";
   }
+
   try {
-    const bin = atob(m[2]);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    await env.LOGO_BUCKET.put(key, bytes, { httpMetadata: { contentType: mime } });
-    return "r2";
+    atob(match[2]);
+    return value;
   } catch {
-    return ""; // malformed image → store nothing rather than failing the request
+    return "";
   }
 }
+
 import {
   aiAssistantEnabledFrom,
   clickLoggingModeFrom,
@@ -115,8 +97,7 @@ function toLinkDTO(
     ogDescription: row.ogDescription,
     // Relative so the editor <img> loads from the current origin (dev → the dev
     // Worker/R2; prod → the live host) instead of a placeholder APP_URL.
-    ogImage:
-      row.ogImage === "r2" ? `/ogimg/${row.id}` : row.ogImage || null,
+    ogImage: row.ogImage === "r2" ? null : row.ogImage || null,
     projectId: row.projectId,
     domainId: row.domainId,
     domain: domainHost,
@@ -394,8 +375,8 @@ route.post("/", zValidator("json", createLinkSchema), async (c) => {
         })
         .returning()
     )[0];
-    // OG image lives in R2 (keyed by the new id), not as a base64 blob in the DB.
-    const og = await resolveOgImage(c.env, row.id, input.ogImage);
+    // Store external URLs or validated raster data URLs without R2.
+    const og = resolveOgImage(input.ogImage);
     if (og) {
       row.ogImage = og;
       await db.update(links).set({ ogImage: og }).where(eq(links.id, row.id));
@@ -892,7 +873,7 @@ route.patch("/:id", zValidator("json", updateLinkSchema), async (c) => {
   if (input.ogTitle !== undefined) patch.ogTitle = input.ogTitle;
   if (input.ogDescription !== undefined) patch.ogDescription = input.ogDescription;
   if (input.ogImage !== undefined) {
-    patch.ogImage = await resolveOgImage(c.env, existing.id, input.ogImage);
+    patch.ogImage = resolveOgImage(input.ogImage);
   }
   if (input.projectId !== undefined) {
     patch.projectId = await resolveProjectId(
@@ -966,9 +947,6 @@ route.delete("/:id", async (c) => {
   // Clear every entry point (live + aliases) before the cascade removes them.
   await purgeLinkCache(c.env, c.var.db, c.var.schema, existing);
   await c.var.db.delete(links).where(eq(links.id, existing.id));
-  if (existing.ogImage === "r2") {
-    await c.env.LOGO_BUCKET.delete(`og/${existing.id}`).catch(() => {});
-  }
   return c.json({ ok: true });
 });
 
