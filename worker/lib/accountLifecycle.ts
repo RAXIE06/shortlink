@@ -85,8 +85,8 @@ export function isEmailBlocked(
 
 /**
  * Cron: hard-delete accounts whose hold window has passed (cascades links,
- * aliases, clicks, domains), clean up their R2 OG images, and prune tombstones
- * whose full no-register window is over.
+ * aliases, clicks, domains), and prune tombstones whose full no-register window
+ * is over. R2 cleanup is intentionally omitted because R2 is disabled.
  */
 export async function purgeDeletedAccounts(env: AppBindings): Promise<void> {
   const { db, schema, close } = getDbHandle(env);
@@ -94,10 +94,10 @@ export async function purgeDeletedAccounts(env: AppBindings): Promise<void> {
     const settings = await getAllSettings(db, schema);
     const holdMs = accountHoldDaysFrom(settings) * DAY_MS;
     const blockMs = emailBlockDaysFrom(settings) * DAY_MS;
-    const { users, links, projects, deletedAccounts } = schema;
+    const { users, deletedAccounts } = schema;
 
-    // Bound work per run (each doomed user fans out R2 lists + deletes). The
-    // query is idempotent, so the next nightly run drains any remainder.
+    // Bound work per run. The query is idempotent, so the next nightly run
+    // drains any remainder.
     const doomed = await db
       .select({ id: users.id })
       .from(users)
@@ -106,31 +106,6 @@ export async function purgeDeletedAccounts(env: AppBindings): Promise<void> {
 
     if (doomed.length > 0) {
       const ids = doomed.map((u) => u.id);
-      // Free the R2 blobs the cascade can't reach.
-      const ogRows = await db
-        .select({ id: links.id })
-        .from(links)
-        .where(and(inArray(links.userId, ids), eq(links.ogImage, "r2")));
-      await Promise.all(
-        ogRows.map((l) => env.LOGO_BUCKET.delete(`og/${l.id}`).catch(() => {})),
-      );
-      // Also free each user's saved-logo library (≤30 objects, keyed by user id).
-      await Promise.all(
-        ids.map(async (uid) => {
-          const logos = await env.LOGO_BUCKET.list({ prefix: `logos/${uid}/` });
-          await Promise.all(
-            logos.objects.map((o) => env.LOGO_BUCKET.delete(o.key).catch(() => {})),
-          );
-        }),
-      );
-      // …and any legacy R2 project logos (projlogo/<id>); new ones are inline.
-      const projRows = await db
-        .select({ id: projects.id })
-        .from(projects)
-        .where(and(inArray(projects.userId, ids), eq(projects.logo, "r2")));
-      await Promise.all(
-        projRows.map((p) => env.LOGO_BUCKET.delete(`projlogo/${p.id}`).catch(() => {})),
-      );
       await db.delete(users).where(inArray(users.id, ids));
     }
 
