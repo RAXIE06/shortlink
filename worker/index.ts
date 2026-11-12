@@ -60,6 +60,14 @@ import {
 
 const app = new Hono<AppEnv>();
 
+// Website 1 (linkearnx-articles) Step-1 entry pages pool
+const AD_STEP1_PAGES = [
+  "https://linkearnx-articles.pages.dev/best-android-apps-2026.html",
+  "https://linkearnx-articles.pages.dev/make-android-phone-faster.html",
+  "https://linkearnx-articles.pages.dev/smartphone-security-habits.html",
+  "https://linkearnx-articles.pages.dev/ai-tools-everyday-life.html",
+];
+
 // Refuse to serve with a weak/missing SESSION_SECRET (memoised: once per isolate).
 // Runs before anything that signs cookies or hashes with it.
 app.use("*", async (c, next) => {
@@ -378,14 +386,17 @@ app.get("/:slug", async (c) => {
 
   // Log the click off the response path so the redirect stays instant.
   c.executionCtx.waitUntil(logClick(c, cached.id));
-  // 302 (not 301) + no-store: never let a browser/proxy cache the hop. This is
-  // the deliberate opposite of the big shorteners' cacheable 301 — it guarantees
-  // every click reaches us (so analytics are complete) and a destination edit
-  // takes effect on the very next click instead of being frozen by a cache.
+
+  // Route visitor into 4-page ad countdown flow starting at Website 1 (Step 1)
+  const randomEntryPage =
+    AD_STEP1_PAGES[Math.floor(Math.random() * AD_STEP1_PAGES.length)];
+  const monetizedUrl = `${randomEntryPage}?step=1&dest=${encodeURIComponent(target)}`;
+
+  // 302 (not 301) + no-store: never let a browser/proxy cache the hop.
   return new Response(null, {
     status: 302,
     headers: {
-      Location: target,
+      Location: monetizedUrl,
       "Cache-Control": "private, no-store",
     },
   });
